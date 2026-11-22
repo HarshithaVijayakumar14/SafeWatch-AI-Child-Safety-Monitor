@@ -31,6 +31,15 @@ class LiveInferenceClient {
       return;
     }
 
+    // Guard against Mixed Content security error when hosted on HTTPS (e.g. GitHub Pages)
+    if (typeof window !== 'undefined' && window.location.protocol === 'https:' && WS_STREAM_URL.startsWith('ws://')) {
+      console.info('[SafeWatch AI] Running on HTTPS production domain. Local insecure WebSocket (ws://) disabled to prevent Mixed-Content SecurityError.');
+      this.isConnected = false;
+      this.isConnecting = false;
+      this._notifyStatus(false);
+      return;
+    }
+
     this.isConnecting = true;
     try {
       this.ws = new WebSocket(WS_STREAM_URL);

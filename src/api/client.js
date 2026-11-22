@@ -16,6 +16,12 @@ export function getBackendStatus() {
 }
 
 async function handleFetch(endpoint, options = {}) {
+  // If running on HTTPS (e.g. GitHub Pages), skip insecure http:// requests to prevent browser Mixed-Content block
+  if (typeof window !== 'undefined' && window.location.protocol === 'https:' && API_BASE_URL.startsWith('http://')) {
+    isBackendLive = false;
+    throw new Error('Insecure HTTP backend blocked on HTTPS production origin');
+  }
+
   const url = `${API_BASE_URL}${endpoint}`;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 4000);

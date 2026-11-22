@@ -9,38 +9,9 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    
-    <script>
-      // Production style injector for GitHub Pages static hosting
-      if (window.location.hostname.includes('github.io')) {
-        var link = document.createElement('link');
-        link.rel = 'stylesheet';
-        link.crossOrigin = '';
-        link.href = './assets/index-whQX0Gug.css';
-        document.head.appendChild(link);
-      }
-    </script>
   </head>
   <body class="bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 antialiased selection:bg-cyan-500 selection:text-white">
     <div id="root"></div>
-
-    <script>
-      (function() {
-        if (window.location.hostname.includes('github.io')) {
-          // GitHub Pages production bundle loader
-          var s = document.createElement('script');
-          s.type = 'module';
-          s.crossOrigin = '';
-          s.src = './assets/index-DAen-ZLV.js';
-          document.body.appendChild(s);
-        } else {
-          // Local Vite development server loader
-          var s = document.createElement('script');
-          s.type = 'module';
-          s.src = '/src/main.jsx';
-          document.body.appendChild(s);
-        }
-      })();
-    </script>
+    <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

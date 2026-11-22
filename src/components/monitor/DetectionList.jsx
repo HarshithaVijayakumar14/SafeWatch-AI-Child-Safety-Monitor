@@ -84,7 +84,9 @@ export function DetectionList() {
                         {person.label}
                       </h4>
                       <span className="text-[10px] text-slate-500 font-medium">
-                        {person.is_child ? 'Pediatric Detection' : 'Adult / Guardian'}
+                        {person.classification
+                          ? `${person.classification}${person.confidence ? ` (${(person.confidence * 100).toFixed(0)}%)` : ''}`
+                          : (person.is_child ? 'Pediatric Detection' : 'Adult / Guardian')}
                       </span>
                     </div>
                   </div>

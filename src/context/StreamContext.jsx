@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
 import { streamManager } from '../api/mockStream';
-import { api, USE_MOCK } from '../api/client';
+import { api } from '../api/client';
+import { liveInferenceClient } from '../services/liveInferenceClient';
 import { playDangerAlert } from '../utils/audio';
 import { generateSyntheticCCTVBlob } from '../utils/sampleVideoGenerator';
 
@@ -16,7 +17,7 @@ export function StreamProvider({ children }) {
     active_zones_count: 0
   });
 
-  // Default: NO automated background simulation until user explicitly starts it
+  // Streaming lifecycle states
   const [isStreaming, setIsStreaming] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
@@ -30,10 +31,83 @@ export function StreamProvider({ children }) {
   const [settings, setSettings] = useState(null);
   const [soundEnabled, setSoundEnabled] = useState(true);
 
-  // Webcam stream state centralized across all views
+  // Backend connection status
+  const [isBackendConnected, setIsBackendConnected] = useState(false);
+
+  // Active Video DOM element reference for frame extraction
+  const activeVideoRef = useRef(null);
+
+  // Webcam stream state
   const [webcamStream, setWebcamStream] = useState(null);
   const [isWebcamActive, setIsWebcamActive] = useState(false);
   const [webcamError, setWebcamError] = useState(null);
+
+  // Register active video element (called by VideoCanvas for webcam or uploaded video)
+  const registerVideoElement = useCallback((videoEl) => {
+    activeVideoRef.current = videoEl;
+  }, []);
+
+  const unregisterVideoElement = useCallback(() => {
+    activeVideoRef.current = null;
+  }, []);
+
+  // Monitor live inference client WebSocket connection status
+  useEffect(() => {
+    const unsub = liveInferenceClient.onStatusChange((connected) => {
+      setIsBackendConnected(connected);
+      console.log(`[SafeWatch AI] Python AI engine status: ${connected ? 'ONLINE' : 'OFFLINE'}`);
+    });
+    return unsub;
+  }, []);
+
+  // Subscribe to live AI inference results from Python FastAPI backend
+  useEffect(() => {
+    const unsub = liveInferenceClient.subscribe((backendFrame) => {
+      // Only consume live inference if not in purely simulated demo mode
+      if (sourceType === 'simulated' && demoMode) return;
+
+      if (backendFrame && backendFrame.people) {
+        setFrameData({
+          frame_id: backendFrame.frame_id || 0,
+          timestamp: backendFrame.timestamp || new Date().toISOString(),
+          people: backendFrame.people || [],
+          status: backendFrame.status || 'SAFE',
+          fps: backendFrame.fps || 15.0,
+          active_zones_count: backendFrame.active_zones_count || 0
+        });
+
+        // Trigger real-time notifications for newly triggered alerts
+        if (backendFrame.new_alerts && backendFrame.new_alerts.length > 0) {
+          backendFrame.new_alerts.forEach((alert) => {
+            window.dispatchEvent(new CustomEvent('safewatch-new-alert', { detail: alert }));
+          });
+        }
+      }
+    });
+
+    return unsub;
+  }, [sourceType, demoMode]);
+
+  // Frame streaming pump: samples active video frame and transmits to Python backend
+  useEffect(() => {
+    if (!isStreaming || isPaused || sourceType === 'standby' || sourceType === 'simulated') {
+      return;
+    }
+
+    let intervalId;
+    const sendNextFrame = () => {
+      if (activeVideoRef.current && isBackendConnected) {
+        liveInferenceClient.sendVideoFrame(activeVideoRef.current);
+      }
+    };
+
+    // Pump frames at ~18 FPS (55ms interval)
+    intervalId = setInterval(sendNextFrame, 55);
+
+    return () => {
+      clearInterval(intervalId);
+    };
+  }, [isStreaming, isPaused, sourceType, isBackendConnected]);
 
   const startWebcam = useCallback(async () => {
     try {
@@ -51,6 +125,7 @@ export function StreamProvider({ children }) {
       setSourceType('webcam');
       setIsStreaming(true);
       setIsPaused(false);
+      liveInferenceClient.reset();
       streamManager.setMode('webcam');
       streamManager.start();
     } catch (err) {
@@ -109,6 +184,7 @@ export function StreamProvider({ children }) {
     setSourceType('upload');
     setIsStreaming(true);
     setIsPaused(false);
+    liveInferenceClient.reset();
     streamManager.setMode('upload');
     streamManager.start();
   }, [webcamStream]);
@@ -174,16 +250,19 @@ export function StreamProvider({ children }) {
     loadConfig();
   }, []);
 
-  // Subscribe to stream manager
+  // Fallback subscription to local stream manager for demo mode or offline mode
   useEffect(() => {
     const unsubscribe = streamManager.subscribe((incomingFrame) => {
-      setFrameData(incomingFrame);
+      // Use local stream manager only if backend is disconnected OR in simulated demo mode
+      if (!isBackendConnected || (sourceType === 'simulated' && demoMode)) {
+        setFrameData(incomingFrame);
+      }
     });
 
     return () => {
       unsubscribe();
     };
-  }, []);
+  }, [isBackendConnected, sourceType, demoMode]);
 
   // Audio beep loop if danger is active
   const lastDangerBeep = useRef(0);
@@ -312,7 +391,10 @@ export function StreamProvider({ children }) {
         isDrawingChildBox,
         setIsDrawingChildBox,
         isVideoTrackingEnabled,
-        setIsVideoTrackingEnabled
+        setIsVideoTrackingEnabled,
+        isBackendConnected,
+        registerVideoElement,
+        unregisterVideoElement
       }}
     >
       {children}

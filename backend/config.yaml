@@ -1,0 +1,48 @@
+server:
+  host: "0.0.0.0"
+  port: 8000
+  reload: false
+  cors_origins:
+    - "http://localhost:3000"
+    - "http://127.0.0.1:3000"
+    - "*"
+
+models:
+  yolo_model: "models/yolov8n.pt"
+  classifier_model: "models/mobilenet_child_classifier.pth"
+  device: "auto" # "cuda", "cpu", or "auto"
+  conf_threshold: 0.35
+  iou_threshold: 0.45
+
+tracking:
+  tracker_type: "bytetrack.yaml"
+  track_high_thresh: 0.4
+  track_low_thresh: 0.1
+  new_track_thresh: 0.4
+  track_buffer: 30
+  match_thresh: 0.8
+
+classification:
+  use_mobilenet: true
+  mobilenet_conf_thresh: 0.60
+  baseline_height_ratio_thresh: 0.42 # height / frame_height
+  baseline_aspect_ratio_min: 1.2
+  baseline_aspect_ratio_max: 3.2
+  temporal_window_frames: 10 # smooth classification over 10 frames
+
+hazard_zones:
+  default_warning_distance: 75
+  default_danger_distance: 25
+
+alerts:
+  adult_nearby_distance: 90
+  approach_speed_threshold: 1.5 # m/s or relative px/s
+  cooldown_sec: 15
+  auto_snapshot: true
+  snapshots_dir: "outputs/snapshots"
+  database_path: "safewatch.db"
+
+telegram:
+  enabled: false
+  bot_token: ""
+  chat_id: ""

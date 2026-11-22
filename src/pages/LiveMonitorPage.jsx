@@ -41,7 +41,8 @@ export function LiveMonitorPage() {
     isWebcamActive,
     startWebcam,
     stopWebcam,
-    webcamError
+    webcamError,
+    isBackendConnected
   } = useStream();
 
   const { addToast } = useAlerts();
@@ -109,15 +110,15 @@ export function LiveMonitorPage() {
           {/* Quick status bar */}
           <div className="flex items-center gap-2 bg-white dark:bg-slate-900 p-1.5 px-3 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm text-xs">
             <div className="flex items-center gap-1.5 pr-3 border-r border-slate-200 dark:border-slate-800">
-              <Radio className="w-3.5 h-3.5 text-emerald-500 animate-pulse" />
+              <Radio className={`w-3.5 h-3.5 ${isBackendConnected ? 'text-emerald-500' : 'text-amber-500'} animate-pulse`} />
               <span className="font-semibold text-slate-700 dark:text-slate-200">
-                FPS: {isStreaming ? 29.4 : 0}
+                FPS: {isStreaming ? (frameData.fps ? Number(frameData.fps).toFixed(1) : '20.0') : '0.0'}
               </span>
             </div>
             <div className="flex items-center gap-1.5 pr-3 border-r border-slate-200 dark:border-slate-800">
               <Cpu className="w-3.5 h-3.5 text-cyan-500" />
               <span className="text-slate-600 dark:text-slate-400">
-                YOLOv8n + DeepSORT
+                {isBackendConnected ? 'YOLOv8n + ByteTrack + MobileNetV2' : 'SafeWatch Neural Sim'}
               </span>
             </div>
             <div className="flex items-center gap-1.5">

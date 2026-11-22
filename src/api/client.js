@@ -1,106 +1,170 @@
 /**
  * Unified SafeWatch API Client
  * 
- * Switching to a live backend only requires toggling USE_MOCK = false
- * and configuring the API_BASE_URL / WS_STREAM_URL.
+ * Auto-detects live Python FastAPI backend at API_BASE_URL,
+ * with graceful fallback to local cache if offline.
  */
 import { mockApi } from './mock';
 
-export const USE_MOCK = true;
 export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 export const WS_STREAM_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws/stream';
 
+let isBackendLive = false;
+
+export function getBackendStatus() {
+  return isBackendLive;
+}
+
 async function handleFetch(endpoint, options = {}) {
   const url = `${API_BASE_URL}${endpoint}`;
-  const response = await fetch(url, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-    ...options,
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 4000);
 
-  if (!response.ok) {
-    const errorBody = await response.text();
-    throw new Error(`API Error [${response.status}]: ${errorBody || response.statusText}`);
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        ...options.headers,
+      },
+      ...options,
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(`API Error [${response.status}]: ${errorBody || response.statusText}`);
+    }
+
+    isBackendLive = true;
+    return response.json();
+  } catch (err) {
+    clearTimeout(timeoutId);
+    isBackendLive = false;
+    throw err;
   }
-
-  return response.json();
 }
 
 export const api = {
   // --- Zones ---
   async getZones() {
-    if (USE_MOCK) return mockApi.getZones();
-    return handleFetch('/api/zones');
+    try {
+      return await handleFetch('/api/zones');
+    } catch (err) {
+      return mockApi.getZones();
+    }
   },
 
   async saveZone(zone) {
-    if (USE_MOCK) return mockApi.saveZone(zone);
-    return handleFetch('/api/zones', {
-      method: 'POST',
-      body: JSON.stringify(zone),
-    });
+    try {
+      return await handleFetch('/api/zones', {
+        method: 'POST',
+        body: JSON.stringify(zone),
+      });
+    } catch (err) {
+      return mockApi.saveZone(zone);
+    }
   },
 
   async deleteZone(id) {
-    if (USE_MOCK) return mockApi.deleteZone(id);
-    return handleFetch(`/api/zones/${id}`, {
-      method: 'DELETE',
-    });
+    try {
+      return await handleFetch(`/api/zones/${id}`, {
+        method: 'DELETE',
+      });
+    } catch (err) {
+      return mockApi.deleteZone(id);
+    }
   },
 
   // --- Alerts ---
   async getAlerts() {
-    if (USE_MOCK) return mockApi.getAlerts();
-    return handleFetch('/api/alerts');
+    try {
+      return await handleFetch('/api/alerts');
+    } catch (err) {
+      return mockApi.getAlerts();
+    }
   },
 
   async addAlert(alert) {
-    if (USE_MOCK) return mockApi.addAlert(alert);
-    return handleFetch('/api/alerts', {
-      method: 'POST',
-      body: JSON.stringify(alert),
-    });
+    try {
+      return await handleFetch('/api/alerts', {
+        method: 'POST',
+        body: JSON.stringify(alert),
+      });
+    } catch (err) {
+      return mockApi.addAlert(alert);
+    }
   },
 
   async acknowledgeAlert(id) {
-    if (USE_MOCK) return mockApi.acknowledgeAlert(id);
-    return handleFetch(`/api/alerts/${id}/ack`, {
-      method: 'POST',
-    });
+    try {
+      return await handleFetch(`/api/alerts/${id}/ack`, {
+        method: 'POST',
+      });
+    } catch (err) {
+      return mockApi.acknowledgeAlert(id);
+    }
   },
 
   async clearAlerts() {
-    if (USE_MOCK) return mockApi.clearAlerts();
-    return handleFetch('/api/alerts', {
-      method: 'DELETE',
-    });
+    try {
+      return await handleFetch('/api/alerts', {
+        method: 'DELETE',
+      });
+    } catch (err) {
+      return mockApi.clearAlerts();
+    }
   },
 
   // --- System Status ---
   async getStatus() {
-    if (USE_MOCK) return mockApi.getStatus();
-    return handleFetch('/api/status');
+    try {
+      return await handleFetch('/api/status');
+    } catch (err) {
+      return mockApi.getStatus();
+    }
   },
 
   // --- Settings ---
   async getSettings() {
-    if (USE_MOCK) return mockApi.getSettings();
-    return handleFetch('/api/settings');
+    try {
+      return await handleFetch('/api/settings');
+    } catch (err) {
+      return mockApi.getSettings();
+    }
   },
 
   async saveSettings(settings) {
-    if (USE_MOCK) return mockApi.saveSettings(settings);
-    return handleFetch('/api/settings', {
-      method: 'POST',
-      body: JSON.stringify(settings),
-    });
+    try {
+      return await handleFetch('/api/settings', {
+        method: 'POST',
+        body: JSON.stringify(settings),
+      });
+    } catch (err) {
+      return mockApi.saveSettings(settings);
+    }
   },
 
   async resetDefaults() {
-    if (USE_MOCK) return mockApi.resetDefaults();
-    return handleFetch('/api/reset', { method: 'POST' });
+    try {
+      return await handleFetch('/api/reset', { method: 'POST' });
+    } catch (err) {
+      return mockApi.resetDefaults();
+    }
+  },
+
+  // --- Video File Upload ---
+  async uploadVideo(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const response = await fetch(`${API_BASE_URL}/api/upload-video`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!response.ok) {
+      throw new Error(`Upload failed: ${response.statusText}`);
+    }
+    return response.json();
   }
 };
 

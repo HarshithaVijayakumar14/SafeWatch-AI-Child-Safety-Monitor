@@ -44,7 +44,10 @@ export function VideoCanvas({
     toggleAutoApproach,
     isDrawingChildBox,
     setIsDrawingChildBox,
-    isVideoTrackingEnabled
+    isVideoTrackingEnabled,
+    isBackendConnected,
+    registerVideoElement,
+    unregisterVideoElement
   } = useStream();
 
   const containerRef = useRef(null);
@@ -78,16 +81,22 @@ export function VideoCanvas({
     trackerRef.current.setEnabled(isVideoTrackingEnabled);
   }, [isVideoTrackingEnabled]);
 
-  // Sync webcam stream to video element
+  // Sync webcam stream to video element and register with inference engine
   useEffect(() => {
     const el = webcamRef?.current || localWebcamRef.current;
     if (el && webcamStream && sourceType === 'webcam') {
       el.srcObject = webcamStream;
       el.play().catch(e => console.warn('Webcam stream play warning', e));
+      if (registerVideoElement) registerVideoElement(el);
     }
-  }, [webcamStream, webcamRef, sourceType]);
+    return () => {
+      if (sourceType === 'webcam' && unregisterVideoElement) {
+        unregisterVideoElement();
+      }
+    };
+  }, [webcamStream, webcamRef, sourceType, registerVideoElement, unregisterVideoElement]);
 
-  // Force load and play whenever uploadedVideoUrl changes
+  // Force load and play whenever uploadedVideoUrl changes and register for AI inference
   useEffect(() => {
     const video = videoPlayerRef.current;
     if (video && uploadedVideoUrl) {
@@ -99,6 +108,7 @@ export function VideoCanvas({
       video.currentTime = 0.01; // primes the first frame immediately
       video.load();
       trackerRef.current.init(video, 320, 200, 38, 64);
+      if (registerVideoElement) registerVideoElement(video);
       const p = video.play();
       if (p !== undefined) {
         p.then(() => {
@@ -110,7 +120,12 @@ export function VideoCanvas({
         });
       }
     }
-  }, [uploadedVideoUrl]);
+    return () => {
+      if (sourceType === 'upload' && unregisterVideoElement) {
+        unregisterVideoElement();
+      }
+    };
+  }, [uploadedVideoUrl, sourceType, registerVideoElement, unregisterVideoElement]);
 
   // Sync video play/pause with stream controls
   useEffect(() => {
@@ -404,7 +419,7 @@ export function VideoCanvas({
       }
 
       // 4. Draw High-Tech On-Screen Display (OSD)
-      drawOSD(ctx, V_WIDTH, V_HEIGHT, frameData, systemStatus, sourceType, uploadedVideoName);
+      drawOSD(ctx, V_WIDTH, V_HEIGHT, frameData, systemStatus, sourceType, uploadedVideoName, isBackendConnected);
 
       animId = requestAnimationFrame(render);
     };
@@ -763,8 +778,13 @@ function drawBoundingBox(ctx, person, isBeingDragged) {
   ctx.fill();
 
   // 4. Label Header Pill
-  const roleTag = person.is_child ? 'CHILD' : 'ADULT';
-  const infoText = `${person.label} [${roleTag}] - ${person.level}`;
+  const roleTag = person.classification 
+    ? person.classification.toUpperCase() 
+    : (person.is_child ? 'CHILD' : 'ADULT');
+  const confText = person.confidence !== undefined && person.confidence !== null 
+    ? ` ${(person.confidence * 100).toFixed(0)}%` 
+    : '';
+  const infoText = `${person.label} [${roleTag}${confText}] - ${person.level}`;
   ctx.font = '600 11px system-ui, sans-serif';
   const textWidth = ctx.measureText(infoText).width;
 
@@ -776,7 +796,10 @@ function drawBoundingBox(ctx, person, isBeingDragged) {
 
   // 5. Distance and Speed sub-badge below box if child
   if (person.is_child && person.distance_px !== undefined) {
-    const subText = `${person.distance_px}px to hazard | ${person.speed} m/s`;
+    let subText = `${person.distance_px}px to hazard | ${person.speed} m/s`;
+    if (person.direction && person.direction !== 'stationary') {
+      subText += ` | ${person.direction}`;
+    }
     ctx.font = 'bold 10px monospace';
     const subWidth = ctx.measureText(subText).width;
     ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
@@ -842,25 +865,27 @@ function drawGuardianLink(ctx, childFoot, adultFoot) {
   ctx.restore();
 }
 
-function drawOSD(ctx, width, height, frameData, systemStatus, sourceType, uploadedVideoName) {
+function drawOSD(ctx, width, height, frameData, systemStatus, sourceType, uploadedVideoName, isBackendConnected) {
   ctx.save();
 
   // Top Left: Stream Diagnostics
   ctx.fillStyle = 'rgba(15, 23, 42, 0.7)';
-  ctx.fillRect(12, 12, 240, 50);
+  ctx.fillRect(12, 12, 260, 50);
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
   ctx.lineWidth = 1;
-  ctx.strokeRect(12, 12, 240, 50);
+  ctx.strokeRect(12, 12, 260, 50);
 
   ctx.fillStyle = '#38bdf8';
   ctx.font = 'bold 11px monospace';
   ctx.textAlign = 'left';
-  ctx.fillText('SAFEWATCH CAM-01 [ACTIVE]', 20, 28);
+  const engineBadge = isBackendConnected ? 'LIVE AI [FASTAPI]' : 'LOCAL [STANDBY]';
+  ctx.fillText(`SAFEWATCH CAM-01 [${engineBadge}]`, 20, 28);
 
   ctx.fillStyle = '#94a3b8';
   ctx.font = '10px monospace';
   const timeStr = new Date().toLocaleTimeString();
-  ctx.fillText(`FPS: 29.4 | ${timeStr} | F#${frameData.frame_id || 100}`, 20, 44);
+  const currentFps = frameData.fps ? Number(frameData.fps).toFixed(1) : '20.0';
+  ctx.fillText(`FPS: ${currentFps} | ${timeStr} | F#${frameData.frame_id || 100}`, 20, 44);
 
   // Bottom Left: Detection Model Watermark
   const sourceLabel = sourceType === 'upload' 
@@ -871,11 +896,15 @@ function drawOSD(ctx, width, height, frameData, systemStatus, sourceType, upload
         ? 'DEMO CCTV SIMULATION'
         : 'STANDBY';
 
-  ctx.fillStyle = 'rgba(15, 23, 42, 0.7)';
-  ctx.fillRect(12, height - 32, 330, 22);
-  ctx.fillStyle = '#38bdf8';
+  const detectorText = isBackendConnected
+    ? `DETECTOR: YOLOv8n + ByteTrack + MobileNetV2 [${sourceLabel}]`
+    : `DETECTOR: SafeWatch Neural Sim [${sourceLabel}]`;
+
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.75)';
+  ctx.fillRect(12, height - 32, 400, 22);
+  ctx.fillStyle = isBackendConnected ? '#10b981' : '#38bdf8';
   ctx.font = '10px monospace';
-  ctx.fillText(`DETECTOR: YOLOv8-Child + DeepSORT [${sourceLabel}]`, 18, height - 17);
+  ctx.fillText(detectorText, 18, height - 17);
 
   ctx.restore();
 }

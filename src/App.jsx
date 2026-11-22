@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { ThemeProvider } from './context/ThemeContext';
 import { AlertProvider } from './context/AlertContext';
 import { StreamProvider } from './context/StreamContext';
@@ -19,7 +19,7 @@ export function App() {
     <ThemeProvider>
       <AlertProvider>
         <StreamProvider>
-          <BrowserRouter>
+          <HashRouter>
             <Routes>
               {/* Landing Page with full-width custom layout */}
               <Route path="/" element={<LandingPage />} />
@@ -41,7 +41,7 @@ export function App() {
               {/* Catch-all fallback */}
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
-          </BrowserRouter>
+          </HashRouter>
         </StreamProvider>
       </AlertProvider>
     </ThemeProvider>

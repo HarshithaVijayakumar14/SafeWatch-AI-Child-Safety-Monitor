@@ -19,7 +19,7 @@ class YOLOv8PersonDetector:
     def __init__(
         self,
         model_path: str = "models/yolov8n.pt",
-        conf_threshold: float = 0.35,
+        conf_threshold: float = 0.18,
         iou_threshold: float = 0.45,
         device: str = "auto"
     ):

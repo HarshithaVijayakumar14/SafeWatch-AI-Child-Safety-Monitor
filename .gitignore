@@ -8,3 +8,6 @@ __pycache__/
 *.pt
 *.pth
 outputs/
+*.db
+backend/data/adult/realistic_*.jpg
+backend/data/child/realistic_*.jpg

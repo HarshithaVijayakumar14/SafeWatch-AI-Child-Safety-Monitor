@@ -22,9 +22,9 @@ class PersonTracker:
         self,
         model_path: str = "models/yolov8n.pt",
         tracker_type: str = "bytetrack.yaml",
-        conf_threshold: float = 0.35,
+        conf_threshold: float = 0.18,
         iou_threshold: float = 0.45,
-        track_history_len: int = 30,
+        track_history_len: int = 45,
         device: str = "auto"
     ):
         self.model_path = model_path
@@ -81,10 +81,15 @@ class PersonTracker:
         """Clear all active tracks and reset trajectories (e.g. on new stream or video upload)."""
         self.trajectories.clear()
         self.last_seen.clear()
-        # Reset internal tracker state in YOLO model if available
+        # Reset internal tracker state in YOLO model safely (empty list, not None)
         if self.model is not None and hasattr(self.model, "predictor") and self.model.predictor is not None:
-            if hasattr(self.model.predictor, "trackers"):
-                self.model.predictor.trackers = None
+            if hasattr(self.model.predictor, "trackers") and self.model.predictor.trackers is not None:
+                try:
+                    self.model.predictor.trackers.clear()
+                except Exception:
+                    self.model.predictor.trackers = []
+            else:
+                self.model.predictor.trackers = []
         logger.info("PersonTracker state reset.")
 
     def track(self, frame: np.ndarray) -> List[Dict[str, Any]]:
@@ -116,16 +121,28 @@ class PersonTracker:
 
         try:
             # Run Ultralytics track with persist=True for ByteTrack temporal association
-            results = self.model.track(
-                source=frame,
-                persist=True,
-                tracker=self.tracker_type,
-                classes=[0],  # Person class only
-                conf=self.conf_threshold,
-                iou=self.iou_threshold,
-                device=self.device,
-                verbose=False
-            )
+            try:
+                results = self.model.track(
+                    source=frame,
+                    persist=True,
+                    tracker=self.tracker_type,
+                    classes=[0],  # Person class only
+                    conf=self.conf_threshold,
+                    iou=self.iou_threshold,
+                    device=self.device,
+                    verbose=False
+                )
+            except Exception as track_err:
+                # If tracker state had an internal mismatch, fallback to prediction
+                logger.debug(f"ByteTrack fallback to predict: {track_err}")
+                results = self.model.predict(
+                    source=frame,
+                    classes=[0],
+                    conf=self.conf_threshold,
+                    iou=self.iou_threshold,
+                    device=self.device,
+                    verbose=False
+                )
 
             for r in results:
                 boxes = r.boxes

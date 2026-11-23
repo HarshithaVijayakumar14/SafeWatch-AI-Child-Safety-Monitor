@@ -2,7 +2,7 @@
 Child vs. Adult Classification Module for SafeWatch AI
 Combines:
 1. PyTorch MobileNetV2 deep learning classifier with ImageNet transfer learning.
-2. Anthropometric / relative height heuristic baseline.
+2. Anthropometric / relative height, aspect ratio & perspective heuristic baseline.
 3. Temporal exponential smoothing across consecutive tracking frames.
 
 ETHICAL / TECHNICAL DISCLAIMER:
@@ -21,8 +21,8 @@ logger = logging.getLogger("safewatch.classifier")
 
 class ChildAdultClassifier:
     """
-    Two-stage Child vs. Adult classifier with MobileNetV2 and anthropometric fallback,
-    equipped with per-track-ID temporal probability smoothing.
+    Two-stage Child vs. Adult classifier with MobileNetV2 and anthropometric validation,
+    equipped with per-track-ID temporal probability smoothing and feature caching.
     """
 
     CLASSES = ["Adult", "Child"]
@@ -31,9 +31,9 @@ class ChildAdultClassifier:
         self,
         model_path: str = "models/mobilenet_child_classifier.pth",
         use_mobilenet: bool = True,
-        conf_threshold: float = 0.60,
+        conf_threshold: float = 0.58,
         temporal_window: int = 10,
-        baseline_height_ratio: float = 0.42,
+        baseline_height_ratio: float = 0.38,
         device: str = "auto"
     ):
         self.model_path = model_path
@@ -48,6 +48,10 @@ class ChildAdultClassifier:
 
         # Temporal probability history: { track_id: deque([ [prob_adult, prob_child], ... ], maxlen=10) }
         self.temporal_history: Dict[int, deque] = {}
+        # Per-track prediction cache to avoid running heavy CNN on every single frame:
+        # { track_id: {"probs": np.ndarray, "frame_num": int, "method": str} }
+        self.track_cache: Dict[int, Dict[str, Any]] = {}
+        self.frame_index = 0
 
         if self.use_mobilenet:
             self._load_mobilenet()
@@ -82,28 +86,43 @@ class ChildAdultClassifier:
                 )
             ])
 
-            # Build MobileNetV2 architecture with 2-class classifier head
-            base_model = models.mobilenet_v2(weights=None)
-            in_features = base_model.classifier[1].in_features
-            base_model.classifier[1] = nn.Sequential(
-                nn.Dropout(p=0.2),
-                nn.Linear(in_features, 2)
-            )
-
             weights_file = Path(self.model_path)
             if not weights_file.exists():
                 alt_path = Path(__file__).resolve().parent.parent / self.model_path
                 if alt_path.exists():
                     weights_file = alt_path
 
+            base_model = models.mobilenet_v2(weights=None)
+            in_features = base_model.classifier[1].in_features
+
             if weights_file.exists():
                 logger.info(f"Loading trained MobileNetV2 classifier weights from {weights_file}")
                 state_dict = torch.load(str(weights_file), map_location=self.device)
+
+                # Check if trained with 2-layer or 1-layer head
+                if "classifier.1.4.weight" in state_dict or "classifier.1.3.weight" in state_dict:
+                    base_model.classifier[1] = nn.Sequential(
+                        nn.Dropout(p=0.25),
+                        nn.Linear(in_features, 64),
+                        nn.ReLU(inplace=True),
+                        nn.Dropout(p=0.2),
+                        nn.Linear(64, 2)
+                    )
+                else:
+                    base_model.classifier[1] = nn.Sequential(
+                        nn.Dropout(p=0.2),
+                        nn.Linear(in_features, 2)
+                    )
+
                 base_model.load_state_dict(state_dict)
             else:
                 logger.warning(
                     f"MobileNetV2 classifier weights not found at {weights_file}. "
                     "Running with heuristic baseline until model is trained via scripts/train_classifier.py."
+                )
+                base_model.classifier[1] = nn.Sequential(
+                    nn.Dropout(p=0.2),
+                    nn.Linear(in_features, 2)
                 )
 
             base_model.to(self.device)
@@ -115,12 +134,15 @@ class ChildAdultClassifier:
             self.torch_model = None
 
     def reset_track(self, track_id: int) -> None:
-        """Reset temporal history for a specific track ID."""
+        """Reset temporal history and cache for a specific track ID."""
         self.temporal_history.pop(track_id, None)
+        self.track_cache.pop(track_id, None)
 
     def reset_all(self) -> None:
-        """Reset all temporal history."""
+        """Reset all temporal history and cache."""
         self.temporal_history.clear()
+        self.track_cache.clear()
+        self.frame_index = 0
 
     def classify(
         self,
@@ -131,24 +153,11 @@ class ChildAdultClassifier:
         other_boxes: Optional[list] = None
     ) -> Dict[str, Any]:
         """
-        Classify whether the detected person is a Child or an Adult.
-
-        Args:
-            frame: Numpy BGR image array (H, W, C)
-            box: Bounding box [x1, y1, x2, y2]
-            track_id: Tracking ID for temporal smoothing
-            frame_shape: (height, width) of the video frame
-            other_boxes: Other detected person bounding boxes in the same frame for relative scale
-
-        Returns:
-            {
-                "classification": "Child" | "Adult" | "Unknown",
-                "is_child": bool,
-                "confidence": float,
-                "raw_label": str,
-                "method": "mobilenet_v2" | "heuristic"
-            }
+        Classify whether the detected person is a Child, Adult, or Unknown.
+        Applies MobileNetV2 deep visual feature classification with anthropometric validation
+        and multi-frame temporal smoothing.
         """
+        self.frame_index += 1
         x1, y1, x2, y2 = box
         fh, fw = frame_shape if frame_shape else (frame.shape[0], frame.shape[1])
 
@@ -170,60 +179,109 @@ class ChildAdultClassifier:
                 "method": "insufficient_pixels"
             }
 
-        probs = None
-        method = "heuristic"
+        # Check track cache: re-run CNN every 6 frames or when newly tracked
+        use_cached = False
+        if track_id is not None and track_id in self.track_cache:
+            cache_entry = self.track_cache[track_id]
+            frames_since = self.frame_index - cache_entry["frame_num"]
+            if frames_since < 6:
+                probs = cache_entry["probs"]
+                method = cache_entry["method"]
+                use_cached = True
 
-        # 1. Try PyTorch MobileNetV2 inference if weights are loaded
-        if self.torch_model is not None and self.transform is not None:
-            try:
-                import torch
-
-                crop_bgr = frame[cy1:cy2, cx1:cx2]
-                # Convert BGR to RGB
-                crop_rgb = crop_bgr[:, :, ::-1].copy()
-
-                input_tensor = self.transform(crop_rgb).unsqueeze(0).to(self.device)
-
-                with torch.no_grad():
-                    logits = self.torch_model(input_tensor)
-                    probabilities = torch.softmax(logits, dim=1).cpu().numpy()[0]
-                    # probabilities: [p_adult, p_child]
-                    probs = probabilities
-                    method = "mobilenet_v2"
-            except Exception as e:
-                logger.debug(f"MobileNet inference failed, falling back to heuristic: {e}")
-                probs = None
-
-        # 2. Heuristic fallback (relative height and aspect ratio analysis)
-        if probs is None:
+        if not use_cached:
+            probs = None
             method = "heuristic"
+
+            # 1. Try PyTorch MobileNetV2 inference if weights are loaded
+            if self.torch_model is not None and self.transform is not None:
+                try:
+                    import torch
+
+                    crop_bgr = frame[cy1:cy2, cx1:cx2]
+                    # Convert BGR to RGB
+                    crop_rgb = crop_bgr[:, :, ::-1].copy()
+
+                    input_tensor = self.transform(crop_rgb).unsqueeze(0).to(self.device)
+
+                    with torch.no_grad():
+                        logits = self.torch_model(input_tensor)
+                        probabilities = torch.softmax(logits, dim=1).cpu().numpy()[0]
+                        # probabilities: [p_adult, p_child]
+                        probs = probabilities
+                        method = "mobilenet_v2"
+                except Exception as e:
+                    logger.debug(f"MobileNet inference failed, falling back to heuristic: {e}")
+                    probs = None
+
+            # 2. Anthropometric Heuristic Fusion
+            # Children have higher aspect ratio (width/height ~0.42 to 0.58), shorter stature.
+            # Adults have lower aspect ratio (width/height ~0.28 to 0.38), taller stature.
+            aspect_ratio = crop_w / max(1, crop_h)
             rel_height = crop_h / max(1, fh)
 
-            # Compare against other detected people in the frame if available
-            if other_boxes and len(other_boxes) > 1:
-                other_heights = [(b[3] - b[1]) for b in other_boxes]
-                max_h = max(other_heights)
-                # If this person's height is significantly shorter (< 72%) than the tallest person: likely child
-                ratio_to_tallest = crop_h / max_h
-                if ratio_to_tallest < 0.72:
-                    p_child = min(0.85, 0.5 + (0.75 - ratio_to_tallest))
-                    p_adult = 1.0 - p_child
-                elif ratio_to_tallest > 0.88:
-                    p_adult = min(0.90, 0.5 + (ratio_to_tallest - 0.8))
-                    p_child = 1.0 - p_adult
-                else:
-                    p_child = 0.5
-                    p_adult = 0.5
-            else:
-                # Absolute frame ratio heuristic
-                if rel_height < self.baseline_height_ratio:
-                    p_child = min(0.85, 0.5 + (self.baseline_height_ratio - rel_height) * 1.5)
-                    p_adult = 1.0 - p_child
-                else:
-                    p_adult = min(0.88, 0.5 + (rel_height - self.baseline_height_ratio) * 1.5)
-                    p_child = 1.0 - p_adult
+            # Ground contact depth perspective normalization:
+            # People lower down (higher y2) are closer to the camera.
+            # Expected height ratio at ground y2:
+            ground_norm = max(0.2, min(1.0, y2 / max(1, fh)))
+            calibrated_stature = rel_height / ground_norm
 
-            probs = np.array([p_adult, p_child])
+            h_prob_child = 0.5
+            if other_boxes and len(other_boxes) > 1:
+                # Compare against other detected people at similar ground depth
+                other_heights = [
+                    (b[3] - b[1]) for b in other_boxes
+                    if abs(b[3] - y2) < (0.25 * fh)
+                ]
+                if other_heights:
+                    max_nearby_h = max(other_heights)
+                    ratio_to_tallest = crop_h / max(1, max_nearby_h)
+                    if ratio_to_tallest < 0.74:
+                        h_prob_child = min(0.92, 0.55 + (0.74 - ratio_to_tallest) * 1.5)
+                    elif ratio_to_tallest > 0.88:
+                        h_prob_child = max(0.08, 0.45 - (ratio_to_tallest - 0.88) * 1.5)
+            else:
+                # Single person in scene: calibrated stature + aspect ratio
+                if calibrated_stature < 0.32 or rel_height < 0.24:
+                    # Short stature at this ground depth indicates child
+                    h_prob_child = 0.85
+                elif calibrated_stature > 0.52 or rel_height > 0.44:
+                    # Tall stature indicates adult
+                    h_prob_child = 0.15
+                elif aspect_ratio > 0.40:
+                    # Moderate stature with broader child stance
+                    h_prob_child = 0.74
+                elif aspect_ratio < 0.30 and calibrated_stature > 0.40:
+                    # Slender and tall
+                    h_prob_child = 0.20
+                else:
+                    # Intermediate: safety-critical default leans towards child vigilance
+                    h_prob_child = 0.60
+
+            h_prob_adult = 1.0 - h_prob_child
+            heuristic_probs = np.array([h_prob_adult, h_prob_child])
+
+            if probs is not None:
+                # If MobileNet is confident, weight it heavily (75%), otherwise blend 50/50
+                mn_conf = max(probs[0], probs[1])
+                mn_weight = 0.75 if mn_conf > 0.70 else 0.50
+                h_weight = 1.0 - mn_weight
+
+                fused_adult = mn_weight * probs[0] + h_weight * heuristic_probs[0]
+                fused_child = mn_weight * probs[1] + h_weight * heuristic_probs[1]
+                probs = np.array([fused_adult, fused_child])
+                method = "mobilenet_v2+anthropometrics"
+            else:
+                probs = heuristic_probs
+                method = "anthropometrics"
+
+            # Update track cache
+            if track_id is not None:
+                self.track_cache[track_id] = {
+                    "probs": probs,
+                    "frame_num": self.frame_index,
+                    "method": method
+                }
 
         # 3. Apply Temporal Smoothing across consecutive frames for this track ID
         if track_id is not None:
@@ -232,9 +290,11 @@ class ChildAdultClassifier:
 
             self.temporal_history[track_id].append(probs)
 
-            # Compute moving average of probabilities
-            history_matrix = np.array(self.temporal_history[track_id])
-            smoothed_probs = np.mean(history_matrix, axis=0)
+            # Exponentially weighted moving average giving more weight to recent detections
+            history_list = list(self.temporal_history[track_id])
+            weights = np.exp(np.linspace(-1.0, 0.0, len(history_list)))
+            weights /= np.sum(weights)
+            smoothed_probs = np.average(history_list, axis=0, weights=weights)
         else:
             smoothed_probs = probs
 

@@ -11,21 +11,21 @@ models:
   yolo_model: "models/yolov8n.pt"
   classifier_model: "models/mobilenet_child_classifier.pth"
   device: "auto" # "cuda", "cpu", or "auto"
-  conf_threshold: 0.35
+  conf_threshold: 0.18
   iou_threshold: 0.45
 
 tracking:
   tracker_type: "bytetrack.yaml"
-  track_high_thresh: 0.4
-  track_low_thresh: 0.1
-  new_track_thresh: 0.4
-  track_buffer: 30
+  track_high_thresh: 0.30
+  track_low_thresh: 0.10
+  new_track_thresh: 0.22
+  track_buffer: 45
   match_thresh: 0.8
 
 classification:
   use_mobilenet: true
-  mobilenet_conf_thresh: 0.60
-  baseline_height_ratio_thresh: 0.42 # height / frame_height
+  mobilenet_conf_thresh: 0.55
+  baseline_height_ratio_thresh: 0.35 # height / frame_height
   baseline_aspect_ratio_min: 1.2
   baseline_aspect_ratio_max: 3.2
   temporal_window_frames: 10 # smooth classification over 10 frames

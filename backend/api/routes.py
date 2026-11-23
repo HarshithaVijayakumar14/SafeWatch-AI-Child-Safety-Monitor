@@ -331,3 +331,56 @@ async def upload_video(file: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"Failed to save uploaded video: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to save video: {str(e)}")
+
+
+class ProcessVideoRequest(BaseModel):
+    filepath: Optional[str] = None
+    save_annotated: Optional[bool] = True
+    max_frames: Optional[int] = None
+    frame_stride: Optional[int] = 1
+
+
+@router.post("/process-video")
+async def process_video(req: ProcessVideoRequest):
+    """
+    Execute full OpenCV frame-by-frame analysis on an uploaded video file.
+    Runs YOLOv8n, ByteTrack, MobileNetV2, and Hazard Proximity evaluation on every frame.
+    """
+    if not processor:
+        raise HTTPException(status_code=500, detail="Video processor uninitialized")
+
+    video_path = req.filepath
+    if not video_path:
+        # Default to latest video in outputs/uploads
+        upload_dir = Path("outputs/uploads")
+        if not upload_dir.exists():
+            raise HTTPException(status_code=404, detail="No uploaded videos found.")
+        files = list(upload_dir.glob("*.*"))
+        if not files:
+            raise HTTPException(status_code=404, detail="No video files found in uploads directory.")
+        # Sort by modification time
+        files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        video_path = str(files[0])
+
+    target = Path(video_path)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"Video file not found at: {video_path}")
+
+    annotated_output = None
+    if req.save_annotated:
+        out_dir = Path("outputs/annotated")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        annotated_output = str(out_dir / f"annotated_{target.name}")
+
+    try:
+        results = processor.process_video_file(
+            video_path=str(target),
+            output_annotated_path=annotated_output,
+            max_frames=req.max_frames,
+            frame_stride=req.frame_stride or 1
+        )
+        return results
+    except Exception as e:
+        logger.error(f"Error processing video: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Video processing failed: {str(e)}")
+

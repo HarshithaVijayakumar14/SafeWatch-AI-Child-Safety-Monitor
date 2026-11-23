@@ -50,12 +50,23 @@ def evaluate_classifier(
     # Build model architecture
     model = models.mobilenet_v2(weights=None)
     in_features = model.classifier[1].in_features
-    model.classifier[1] = nn.Sequential(
-        nn.Dropout(p=0.2),
-        nn.Linear(in_features, 2)
-    )
-
     state_dict = torch.load(str(weights_file), map_location=device)
+
+    # Automatically adapt head structure to state_dict
+    if "classifier.1.4.weight" in state_dict or "classifier.1.3.weight" in state_dict:
+        model.classifier[1] = nn.Sequential(
+            nn.Dropout(p=0.25),
+            nn.Linear(in_features, 64),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=0.2),
+            nn.Linear(64, 2)
+        )
+    else:
+        model.classifier[1] = nn.Sequential(
+            nn.Dropout(p=0.2),
+            nn.Linear(in_features, 2)
+        )
+
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()

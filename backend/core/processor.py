@@ -2,6 +2,7 @@
 Video Processing Pipeline Orchestrator for SafeWatch AI
 Binds Detection, ByteTrack, MobileNetV2 Classification, Hazard Proximity & Alert Triggering.
 """
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 import time
 import base64
@@ -239,3 +240,161 @@ class VideoProcessor:
             cv2.putText(img, label, (x1, max(15, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1, cv2.LINE_AA)
 
         return img
+
+    def process_video_file(
+        self,
+        video_path: str,
+        output_annotated_path: Optional[str] = None,
+        max_frames: Optional[int] = None,
+        frame_stride: int = 1,
+        progress_callback: Optional[Any] = None
+    ) -> Dict[str, Any]:
+        """
+        Reads a video file frame-by-frame using OpenCV (cv2.VideoCapture), passes every
+        frame through YOLOv8n detection, ByteTrack tracking, MobileNetV2 classification,
+        hazard proximity evaluation, and alert triggering.
+
+        Args:
+            video_path: Path to MP4, AVI, WebM, or MKV video file
+            output_annotated_path: Optional path to save an annotated MP4 video file
+            max_frames: Optional maximum number of frames to process
+            frame_stride: Process every Nth frame (default 1 = every frame)
+            progress_callback: Optional callback fn(current_frame, total_frames, fps)
+
+        Returns:
+            Structured dictionary with summary analytics, unique tracks, and per-frame records.
+        """
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video file at {video_path}")
+
+        # Extract video properties
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        duration_sec = total_frames / max(1.0, fps) if total_frames > 0 else 0.0
+
+        # Reset pipeline state for fresh video tracking
+        self.reset_stream()
+
+        writer = None
+        if output_annotated_path:
+            out_p = Path(output_annotated_path)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(str(out_p), fourcc, fps, (width, height))
+
+        frame_idx = 0
+        processed_count = 0
+        start_t = time.time()
+        per_frame_results = []
+        all_triggered_alerts = []
+        peak_level = "SAFE"
+        unique_tracks: Dict[int, Dict[str, Any]] = {}
+
+        try:
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret or frame is None or frame.size == 0:
+                    break
+
+                frame_idx += 1
+                if frame_stride > 1 and (frame_idx % frame_stride != 0):
+                    continue
+
+                if max_frames and processed_count >= max_frames:
+                    break
+
+                processed_count += 1
+
+                # Execute full inference pipeline
+                res = self.process_frame(frame, return_annotated=False)
+
+                # Draw annotations for output video if writer is active
+                if writer is not None:
+                    annotated_img = self._draw_annotations(frame.copy(), res.get("people", []))
+                    writer.write(annotated_img)
+
+                # Record frame data
+                frame_record = {
+                    "frame_id": frame_idx,
+                    "timestamp": res["timestamp"],
+                    "status": res["status"],
+                    "people_count": len(res.get("people", [])),
+                    "people": res.get("people", [])
+                }
+                per_frame_results.append(frame_record)
+
+                # Track peak status
+                status = res["status"]
+                if status == "DANGER":
+                    peak_level = "DANGER"
+                elif status == "WARNING" and peak_level != "DANGER":
+                    peak_level = "WARNING"
+                elif status == "SUPERVISED" and peak_level == "SAFE":
+                    peak_level = "SUPERVISED"
+
+                # Track unique individuals
+                for p in res.get("people", []):
+                    tid = p["id"]
+                    if tid not in unique_tracks:
+                        unique_tracks[tid] = {
+                            "track_id": tid,
+                            "classification": p.get("classification", "Unknown"),
+                            "is_child": p.get("is_child", False),
+                            "confidence": p.get("confidence", 0.0),
+                            "first_seen_frame": frame_idx,
+                            "last_seen_frame": frame_idx,
+                            "max_risk_level": p.get("level", "SAFE")
+                        }
+                    else:
+                        unique_tracks[tid]["last_seen_frame"] = frame_idx
+                        cur_lvl = unique_tracks[tid]["max_risk_level"]
+                        p_lvl = p.get("level", "SAFE")
+                        if p_lvl == "DANGER" or (p_lvl == "WARNING" and cur_lvl != "DANGER"):
+                            unique_tracks[tid]["max_risk_level"] = p_lvl
+
+                if res.get("new_alerts"):
+                    all_triggered_alerts.extend(res["new_alerts"])
+
+                if progress_callback and frame_idx % 10 == 0:
+                    elapsed = time.time() - start_t
+                    cur_fps = processed_count / max(0.001, elapsed)
+                    progress_callback(frame_idx, total_frames, cur_fps)
+
+        finally:
+            cap.release()
+            if writer is not None:
+                writer.release()
+
+        total_elapsed = time.time() - start_t
+        processing_fps = round(processed_count / max(0.001, total_elapsed), 2)
+
+        children_count = sum(1 for t in unique_tracks.values() if t["is_child"])
+        adults_count = sum(1 for t in unique_tracks.values() if not t["is_child"])
+
+        return {
+            "video_metadata": {
+                "filepath": str(video_path),
+                "width": width,
+                "height": height,
+                "fps": round(fps, 2),
+                "total_frames": total_frames,
+                "duration_seconds": round(duration_sec, 2)
+            },
+            "processing_summary": {
+                "frames_processed": processed_count,
+                "processing_time_sec": round(total_elapsed, 2),
+                "processing_fps": processing_fps,
+                "peak_status": peak_level,
+                "unique_people_detected": len(unique_tracks),
+                "children_detected": children_count,
+                "adults_detected": adults_count,
+                "total_alerts_triggered": len(all_triggered_alerts)
+            },
+            "unique_tracks": list(unique_tracks.values()),
+            "alerts": all_triggered_alerts,
+            "output_annotated_video": output_annotated_path if writer is not None else None,
+            "per_frame_results": per_frame_results
+        }

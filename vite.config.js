@@ -1,9 +1,22 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
+const devHtmlPlugin = () => ({
+  name: 'dev-html-transform',
+  transformIndexHtml(html, ctx) {
+    if (ctx && ctx.server) {
+      return html
+        .replace(/<link rel="stylesheet"[^>]*assets\/index-[^>]*>/, '')
+        .replace(/<link rel="modulepreload"[^>]*>/g, '')
+        .replace(/<script type="module"[^>]*assets\/index-[^>]*><\/script>/, '<script type="module" src="/src/main.jsx"></script>');
+    }
+    return html;
+  }
+});
+
 // https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), devHtmlPlugin()],
   base: './',
   server: {
     port: 3000,
